@@ -6,7 +6,6 @@
 //        the dotfiles bridges, and the exit status is 1.
 //        Rates need two looks, so sampling views wait --interval ms (default 500) between them
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,13 +16,13 @@ use serde::Serialize;
 use serde_json::json;
 
 use mg_taskr::actions::{self, ServiceVerb, Signal};
+use mg_taskr::sampler::Sampler;
 use mg_taskr::services::{self, Scope};
 use mg_taskr::views::{self, SortKey};
-use mg_taskr::{os, procfs, sample, startup, system, units};
+use mg_taskr::{os, sample, startup, system, tui, units};
 
 const PROC_ROOT: &str = "/proc";
 const SYS_ROOT: &str = "/sys";
-const PASSWD: &str = "/etc/passwd";
 const DEFAULT_INTERVAL_MS: u64 = 500;
 
 #[derive(Parser)]
@@ -93,6 +92,8 @@ enum Command {
         #[command(subcommand)]
         action: Option<StartupAction>,
     },
+    /// Full-screen task manager: processes, apps, performance, services, startup
+    Tui,
     /// Send a signal: your processes directly, others through the root helper's allowlist
     Signal {
         pid: u32,
@@ -196,6 +197,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Startup {
             action: Some(StartupAction::Disable { id }),
         } => done(json, startup::set_enabled_here(&id, false)?),
+        Command::Tui => tui::run(),
         Command::Signal { pid, signal } => done(json, actions::signal(proc_root, pid, signal)?),
         Command::Renice { pid, nice } => done(json, actions::renice(proc_root, pid, nice)?),
         Command::Service { scope, verb, unit } => done(json, actions::service(scope, verb, &unit)?),
@@ -214,29 +216,9 @@ fn done(json: bool, message: String) -> Result<()> {
 
 // Two looks at every process and the machine, `interval_ms` apart → rows and totals
 fn sample_all(interval_ms: u64) -> (Vec<sample::Process>, system::System) {
-    let (proc_root, sys_root) = (Path::new(PROC_ROOT), Path::new(SYS_ROOT));
-    let users: HashMap<u32, String> = std::fs::read_to_string(PASSWD)
-        .map(|t| procfs::parse_passwd(&t))
-        .unwrap_or_default();
-    let (procs_before, system_before) = (
-        sample::snapshot(proc_root),
-        system::snapshot(proc_root, sys_root),
-    );
+    let mut sampler = Sampler::new(PROC_ROOT, SYS_ROOT);
     std::thread::sleep(Duration::from_millis(interval_ms.max(1)));
-    let (procs_after, system_after) = (
-        sample::snapshot(proc_root),
-        system::snapshot(proc_root, sys_root),
-    );
-    let cores = system_after.cores() as f64;
-    let rows = sample::diff(
-        &procs_before,
-        &procs_after,
-        os::ticks_per_second(),
-        cores,
-        &users,
-        os::my_uid(),
-    );
-    (rows, system::diff(&system_before, &system_after))
+    sampler.tick()
 }
 
 // JSON when asked, otherwise the table printer

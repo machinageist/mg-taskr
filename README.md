@@ -41,7 +41,27 @@ process gentler; making one faster needs root and is not offered. `--json` print
 - **Disk rates** are only readable for your own processes; others show `—` / `null`.
 - **GPU %** is Intel iGPU busy time from DRM fdinfo. Processes with no GPU client show `—`.
 - **Apps**: a systemd `app-*` scope or service names the app. A systemd-run scope takes the
-  name of the process that started it. Anything else is its own app.
+  name of the process that started it. Kernel threads are one app. Anything else is its own app.
+
+## TUI
+
+```sh
+mg-taskr tui
+```
+
+Tabs: `1` Processes, `2` Apps, `3` Performance, `4` Services, `5` Startup (`Tab`/`Shift+Tab` cycle).
+Move with arrows or `j`/`k`, `PgUp`/`PgDn`, `g`/`G`. `/` filters, `Esc` clears it (a second `Esc`
+or `q` quits).
+
+| Tab | Keys |
+|---|---|
+| Processes | `e`/`Delete` end, `K` kill (both ask y/n), `p` pause, `c` continue, `+` gentler, `s` sort, `t` tree |
+| Apps | the same signals, sent to every process of the app |
+| Services | `S` start, `X` stop, `R` restart (ask y/n), `u` your services ↔ system services |
+| Startup | `space` turn an autostart entry on or off at login |
+
+The graphs cover the last two minutes of this session; nothing is kept after you quit.
+Colours are the terminal's named ANSI colours, so the TUI follows the terminal theme.
 
 ## Gates
 

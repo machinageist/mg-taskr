@@ -14,6 +14,10 @@ use serde::Serialize;
 
 use crate::procfs;
 
+// the kernel's thread parent; every kernel thread is its child
+const KTHREADD: u32 = 2;
+const KERNEL_APP: &str = "kernel threads";
+
 // ── Raw counters for one process at one moment ───────────────────────────
 
 #[derive(Debug, Clone)]
@@ -196,12 +200,16 @@ pub fn diff(
             read_rate: rate(|io| io.0),
             write_rate: rate(|io| io.1),
             gpu,
-            // named app, else the scope's starter, else the process itself
-            app: now
-                .app
-                .clone()
-                .or_else(|| now.cgroup.as_deref().and_then(|c| scopes.get(c)).cloned())
-                .unwrap_or_else(|| name.clone()),
+            // kernel threads (kthreadd, pid 2, and its children) are one app, not a hundred;
+            // otherwise the named app, else the scope's starter, else the process itself
+            app: if *pid == KTHREADD || now.stat.ppid == KTHREADD {
+                KERNEL_APP.to_string()
+            } else {
+                now.app
+                    .clone()
+                    .or_else(|| now.cgroup.as_deref().and_then(|c| scopes.get(c)).cloned())
+                    .unwrap_or_else(|| name.clone())
+            },
             mine: now.uid == Some(me),
             name,
         });
@@ -305,6 +313,15 @@ mod tests {
         assert_eq!(app_of(41), "firefox");
         assert_eq!(app_of(42), "firefox");
         assert_eq!(app_of(1), "app", "a login session scope is never grouped");
+
+        let mut kthreadd = raw(2, 0, 1, None, None);
+        kthreadd.stat.ppid = 0;
+        let mut worker = raw(77, 0, 1, None, None);
+        worker.stat.ppid = 2;
+        worker.app = None;
+        let s = snap(t0, vec![kthreadd, worker]);
+        let rows = diff(&s, &s, 100.0, 1.0, &HashMap::new(), 1000);
+        assert!(rows.iter().all(|r| r.app == "kernel threads"));
     }
 
     #[test]
