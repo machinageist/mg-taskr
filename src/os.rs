@@ -25,3 +25,13 @@ pub fn my_uid() -> u32 {
     // SAFETY: getuid cannot fail and takes no arguments
     unsafe { libc::getuid() }
 }
+
+// Let a closed pipe end the program quietly, as other command-line tools do
+// Rust ignores SIGPIPE by default, so `mg-taskr processes | head` would panic on the next write
+#[allow(unsafe_code)]
+pub fn exit_on_closed_pipe() {
+    // SAFETY: restores the default handler for one signal before any threads start
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}

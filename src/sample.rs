@@ -25,6 +25,7 @@ pub struct Raw {
     pub gpu_busy_ns: Option<u64>,
     pub cmdline: String,
     pub app: Option<String>,
+    pub cgroup: Option<String>,
 }
 
 pub struct Snapshot {
@@ -50,8 +51,9 @@ pub fn snapshot(root: &Path) -> Snapshot {
         let cmdline = std::fs::read(root.join(format!("{pid}/cmdline")))
             .map(|b| procfs::parse_cmdline(&b))
             .unwrap_or_default();
-        let app = procfs::read_text(root, &format!("{pid}/cgroup"))
-            .and_then(|t| procfs::app_from_cgroup(&t));
+        let cgroup_text = procfs::read_text(root, &format!("{pid}/cgroup")).unwrap_or_default();
+        let app = procfs::app_from_cgroup(&cgroup_text);
+        let cgroup = procfs::cgroup_path(&cgroup_text).map(str::to_string);
         let gpu_busy_ns = procfs::read_gpu_busy(root, pid);
         procs.insert(
             pid,
@@ -63,6 +65,7 @@ pub fn snapshot(root: &Path) -> Snapshot {
                 gpu_busy_ns,
                 cmdline,
                 app,
+                cgroup,
             },
         );
     }
@@ -105,6 +108,34 @@ pub fn state_name(state: char) -> &'static str {
     }
 }
 
+// Name each unnamed scope after the process that started it
+// the starter is the one whose parent lives outside the scope; lowest pid breaks a tie
+fn scope_names(procs: &HashMap<u32, Raw>) -> HashMap<&str, String> {
+    let mut leaders: HashMap<&str, &Raw> = HashMap::new();
+    for raw in procs.values() {
+        let Some(path) = raw
+            .cgroup
+            .as_deref()
+            .filter(|p| procfs::is_unnamed_scope(p))
+        else {
+            continue;
+        };
+        let parent_inside =
+            procs.get(&raw.stat.ppid).and_then(|p| p.cgroup.as_deref()) == Some(path);
+        if parent_inside {
+            continue;
+        }
+        let best = leaders.entry(path).or_insert(raw);
+        if raw.stat.pid < best.stat.pid {
+            *best = raw;
+        }
+    }
+    leaders
+        .into_iter()
+        .map(|(path, raw)| (path, raw.stat.comm.clone()))
+        .collect()
+}
+
 // Compare two snapshots into rows
 // `ticks_per_second` is the kernel clock (usually 100); `cores` scales the machine share
 pub fn diff(
@@ -116,6 +147,7 @@ pub fn diff(
     me: u32,
 ) -> Vec<Process> {
     let seconds = after.at.duration_since(before.at).as_secs_f64().max(0.001);
+    let scopes = scope_names(&after.procs);
     let mut rows = Vec::with_capacity(after.procs.len());
     for (pid, now) in &after.procs {
         // a pid reused by a new process between samples has a different start time — treat as new
@@ -164,7 +196,12 @@ pub fn diff(
             read_rate: rate(|io| io.0),
             write_rate: rate(|io| io.1),
             gpu,
-            app: now.app.clone().unwrap_or_else(|| name.clone()),
+            // named app, else the scope's starter, else the process itself
+            app: now
+                .app
+                .clone()
+                .or_else(|| now.cgroup.as_deref().and_then(|c| scopes.get(c)).cloned())
+                .unwrap_or_else(|| name.clone()),
             mine: now.uid == Some(me),
             name,
         });
@@ -196,6 +233,7 @@ mod tests {
             gpu_busy_ns: gpu,
             cmdline: "app --flag".into(),
             app: Some("app".into()),
+            cgroup: None,
         }
     }
 
@@ -239,6 +277,34 @@ mod tests {
         let row = &diff(&before, &after, 100.0, 1.0, &HashMap::new(), 0)[0];
         assert_eq!(row.cpu_core, 0.0);
         assert_eq!(row.user, "1000", "an unknown uid shows as its number");
+    }
+
+    #[test]
+    fn processes_in_an_unnamed_scope_take_the_starters_name() {
+        let t0 = Instant::now();
+        let scoped = |pid: u32, ppid: u32, comm: &str| {
+            let mut r = raw(pid, 0, 1, None, None);
+            r.stat.ppid = ppid;
+            r.stat.comm = comm.into();
+            r.app = None;
+            r.cgroup = Some("/app.slice/run-p40-i1.scope".into());
+            r
+        };
+        let mut shell = raw(1, 0, 1, None, None);
+        shell.app = None;
+        shell.cgroup = Some("/user.slice/session-1.scope".into());
+        let procs = vec![
+            shell,
+            scoped(40, 1, "firefox"),
+            scoped(41, 40, "Isolated Web Co"),
+            scoped(42, 40, "RDD Process"),
+        ];
+        let s = snap(t0, procs);
+        let rows = diff(&s, &s, 100.0, 1.0, &HashMap::new(), 1000);
+        let app_of = |pid: u32| rows.iter().find(|r| r.pid == pid).unwrap().app.clone();
+        assert_eq!(app_of(41), "firefox");
+        assert_eq!(app_of(42), "firefox");
+        assert_eq!(app_of(1), "app", "a login session scope is never grouped");
     }
 
     #[test]

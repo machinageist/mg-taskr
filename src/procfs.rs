@@ -93,7 +93,7 @@ pub fn parse_cmdline(bytes: &[u8]) -> String {
 // systemd puts launched apps in app-<launcher>-<name>-<id>.scope and services in <name>.service;
 // strip the launcher prefix and the unique id so every window of one app groups together
 pub fn app_from_cgroup(text: &str) -> Option<String> {
-    let path = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let path = cgroup_path(text)?;
     let leaf = path.rsplit('/').next()?;
     if let Some(unit) = leaf.strip_suffix(".service") {
         // app-*.service is a launched app too (uwsm style); plain services keep their name
@@ -101,6 +101,22 @@ pub fn app_from_cgroup(text: &str) -> Option<String> {
     }
     let scope = leaf.strip_suffix(".scope")?.strip_prefix("app-")?;
     Some(clean_app(scope))
+}
+
+// The unified (cgroup v2) path from /proc/<pid>/cgroup — the "0::" line
+pub fn cgroup_path(text: &str) -> Option<&str> {
+    text.lines().find_map(|l| l.strip_prefix("0::"))
+}
+
+// A scope that holds one launched program but carries no app name (systemd-run's run-p<pid>-…)
+// its processes belong together, named after whichever one started it.
+// Login sessions and init are scopes too, but hold unrelated programs — never grouped
+pub fn is_unnamed_scope(path: &str) -> bool {
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    leaf.ends_with(".scope")
+        && !leaf.starts_with("app-")
+        && !leaf.starts_with("session-")
+        && leaf != "init.scope"
 }
 
 // Drop launcher prefixes and trailing ids: "hyprland-firefox-1234" → "firefox"
@@ -277,6 +293,14 @@ mod tests {
             Some("com.spotify.Client")
         );
         assert_eq!(app_from_cgroup("0::/init.scope\n"), None);
+        assert!(is_unnamed_scope(
+            "/user.slice/user@1000.service/app.slice/run-p415401-i408647.scope"
+        ));
+        assert!(!is_unnamed_scope(
+            "/user.slice/user-1000.slice/session-1.scope"
+        ));
+        assert!(!is_unnamed_scope("/app.slice/app-hyprland-firefox-1.scope"));
+        assert!(!is_unnamed_scope("/system.slice/sshd.service"));
     }
 
     #[test]
