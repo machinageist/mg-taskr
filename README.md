@@ -22,6 +22,21 @@ mg-taskr startup   [--json]                                 # XDG autostart + Hy
 
 Views that show rates sample twice, `--interval` ms apart (default 500).
 
+## Actions
+
+```sh
+mg-taskr signal  <pid> term|kill|stop|cont
+mg-taskr renice  <pid> <-20..19>                            # own processes; slower only
+mg-taskr service user|system start|stop|restart <unit>
+mg-taskr startup enable|disable <id>                        # writes ~/.config/autostart/<id>.desktop
+```
+
+Your own processes and user units are acted on directly. Root or other-user processes and
+system units go through the geist root helper (`~/dotfiles/system/`), which refuses anything
+not listed in the root-owned `/etc/geist/taskr.conf` (empty at install). Renice can only make a
+process gentler; making one faster needs root and is not offered. `--json` prints
+`{"ok":true,"message":…}` or `{"ok":false,"error":…}` (exit 1).
+
 - **CPU %** `cpu_share` is out of the whole machine (all cores = 100%); `cpu_core` is out of one core, like `top`.
 - **Disk rates** are only readable for your own processes; others show `—` / `null`.
 - **GPU %** is Intel iGPU busy time from DRM fdinfo. Processes with no GPU client show `—`.

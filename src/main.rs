@@ -1,17 +1,22 @@
 // Author: Jeff
 // Date: 2026-09-18
-// Description: mg-taskr command line — processes, apps, system, services, startup
-// Notes: Every view has --json for the shell panel and scripts; without it, a plain table.
+// Description: mg-taskr command line — views (processes, apps, system, services, startup) and actions
+// Notes: --json works on every command for the shell panel and scripts; without it, a plain table
+//        or one line. With --json a failure is still JSON ({"ok":false,"error":…}) on stdout, like
+//        the dotfiles bridges, and the exit status is 1.
 //        Rates need two looks, so sampling views wait --interval ms (default 500) between them
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
+use serde_json::json;
 
+use mg_taskr::actions::{self, ServiceVerb, Signal};
 use mg_taskr::services::{self, Scope};
 use mg_taskr::views::{self, SortKey};
 use mg_taskr::{os, procfs, sample, startup, system, units};
@@ -28,6 +33,9 @@ const DEFAULT_INTERVAL_MS: u64 = 500;
     about = "Process and system manager for the Geist suite"
 )]
 struct Cli {
+    /// Print JSON instead of a table
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -37,9 +45,6 @@ struct Sampling {
     /// Milliseconds between the two looks that rates are measured over
     #[arg(long, default_value_t = DEFAULT_INTERVAL_MS)]
     interval: u64,
-    /// Print JSON instead of a table
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -82,19 +87,65 @@ enum Command {
         /// Your services (the default)
         #[arg(long)]
         user: bool,
-        #[arg(long)]
-        json: bool,
     },
-    /// What starts at login
+    /// What starts at login; `enable`/`disable <id>` switch an autostart entry
     Startup {
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        action: Option<StartupAction>,
+    },
+    /// Send a signal: your processes directly, others through the root helper's allowlist
+    Signal {
+        pid: u32,
+        #[arg(value_enum)]
+        signal: Signal,
+    },
+    /// Change one of your processes' nice value (higher = gentler on the machine)
+    Renice {
+        pid: u32,
+        #[arg(allow_hyphen_values = true, value_parser = clap::value_parser!(i32).range(-20..=19))]
+        nice: i32,
+    },
+    /// Start, stop or restart a service; system units must be allowlisted for the root helper
+    Service {
+        #[arg(value_enum)]
+        scope: Scope,
+        #[arg(value_enum)]
+        verb: ServiceVerb,
+        unit: String,
     },
 }
 
-fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum StartupAction {
+    /// Start this entry at login
+    Enable { id: String },
+    /// Stop this entry starting at login (writes a user copy with Hidden=true)
+    Disable { id: String },
+}
+
+fn main() -> ExitCode {
     os::exit_on_closed_pipe();
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let json = cli.json;
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // {:#} keeps the whole "context: cause" chain on one line
+            if json {
+                println!("{}", json!({ "ok": false, "error": format!("{error:#}") }));
+            } else {
+                eprintln!("mg-taskr: {error:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// Do the one thing asked
+fn run(cli: Cli) -> Result<()> {
+    let json = cli.json;
+    let proc_root = Path::new(PROC_ROOT);
+    match cli.command {
         Command::Processes {
             sort,
             filter,
@@ -107,16 +158,14 @@ fn main() -> Result<()> {
             if tree {
                 let mut rows = views::tree(rows, sort, &filter);
                 rows.truncate(limit);
-                print_or(sampling.json, &rows, || {
+                print_or(json, &rows, || {
                     print_processes(rows.iter().map(|r| (r.depth, &r.process)))
                 })
             } else {
                 let mut rows = views::filter(rows, &filter);
                 views::sort(&mut rows, sort);
                 rows.truncate(limit);
-                print_or(sampling.json, &rows, || {
-                    print_processes(rows.iter().map(|p| (0, p)))
-                })
+                print_or(json, &rows, || print_processes(rows.iter().map(|p| (0, p))))
             }
         }
         Command::Apps {
@@ -126,22 +175,41 @@ fn main() -> Result<()> {
         } => {
             let (rows, _) = sample_all(sampling.interval);
             let apps = views::apps(&views::filter(rows, &filter), sort);
-            print_or(sampling.json, &apps, || print_apps(&apps))
+            print_or(json, &apps, || print_apps(&apps))
         }
         Command::System { sampling } => {
             let (_, totals) = sample_all(sampling.interval);
-            print_or(sampling.json, &totals, || print_system(&totals))
+            print_or(json, &totals, || print_system(&totals))
         }
-        Command::Services { system, json, .. } => {
+        Command::Services { system, .. } => {
             let scope = if system { Scope::System } else { Scope::User };
             let list = services::list(scope)?;
             print_or(json, &list, || print_services(&list))
         }
-        Command::Startup { json } => {
+        Command::Startup { action: None } => {
             let found = startup::list();
             print_or(json, &found, || print_startup(&found))
         }
+        Command::Startup {
+            action: Some(StartupAction::Enable { id }),
+        } => done(json, startup::set_enabled_here(&id, true)?),
+        Command::Startup {
+            action: Some(StartupAction::Disable { id }),
+        } => done(json, startup::set_enabled_here(&id, false)?),
+        Command::Signal { pid, signal } => done(json, actions::signal(proc_root, pid, signal)?),
+        Command::Renice { pid, nice } => done(json, actions::renice(proc_root, pid, nice)?),
+        Command::Service { scope, verb, unit } => done(json, actions::service(scope, verb, &unit)?),
     }
+}
+
+// Report a finished action: one line, or {"ok":true,"message":…}
+fn done(json: bool, message: String) -> Result<()> {
+    if json {
+        println!("{}", json!({ "ok": true, "message": message }));
+    } else {
+        println!("{message}");
+    }
+    Ok(())
 }
 
 // Two looks at every process and the machine, `interval_ms` apart → rows and totals

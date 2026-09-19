@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -132,6 +133,103 @@ pub fn autostart(user_dir: &Path, system_dirs: &[PathBuf], desktops: &[&str]) ->
         by_id.insert(id, e);
     }
     by_id.into_values().collect()
+}
+
+// ── Turning entries on and off ───────────────────────────────────────────
+
+// Set one key inside [Desktop Entry], replacing it if present, else adding it at the group's end
+// other groups ([Desktop Action …]) are left exactly as they were
+pub fn set_key(text: &str, key: &str, value: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_entry = false;
+    let mut done = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // leaving the entry group without having seen the key — add it before the next group
+            if in_entry && !done {
+                out.push(format!("{key}={value}"));
+                done = true;
+            }
+            in_entry = trimmed == "[Desktop Entry]";
+        } else if in_entry
+            && !done
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim() == key)
+        {
+            out.push(format!("{key}={value}"));
+            done = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !done {
+        if !in_entry {
+            out.push("[Desktop Entry]".into());
+        }
+        out.push(format!("{key}={value}"));
+    }
+    out.join("\n") + "\n"
+}
+
+// An id is a file name, never a path
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && !id.starts_with('.') && !id.contains('/') && !id.contains('\0')
+}
+
+// Turn an autostart entry on or off by writing the user's copy
+// a system entry is copied into the user folder first; /etc is never touched
+pub fn set_enabled(
+    id: &str,
+    enabled: bool,
+    user_dir: &Path,
+    system_dirs: &[PathBuf],
+) -> Result<String> {
+    if !valid_id(id) {
+        bail!("{id:?} is not an autostart id");
+    }
+    let user_path = user_dir.join(format!("{id}.desktop"));
+    let source = if user_path.exists() {
+        user_path.clone()
+    } else {
+        system_dirs
+            .iter()
+            .map(|d| d.join(format!("{id}.desktop")))
+            .find(|p| p.exists())
+            .with_context(|| format!("no autostart entry named {id}"))?
+    };
+    let text = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+    let mut next = set_key(&text, "Hidden", if enabled { "false" } else { "true" });
+    // GNOME's own off switch would keep it off after we cleared Hidden
+    if enabled
+        && parse_desktop(&next)
+            .get("X-GNOME-Autostart-enabled")
+            .is_some_and(|v| v.eq_ignore_ascii_case("false"))
+    {
+        next = set_key(&next, "X-GNOME-Autostart-enabled", "true");
+    }
+    std::fs::create_dir_all(user_dir)
+        .with_context(|| format!("creating {}", user_dir.display()))?;
+    // write beside it, then rename — a crash never leaves half a file
+    let tmp = user_dir.join(format!(".{id}.desktop.tmp"));
+    std::fs::write(&tmp, next).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &user_path).with_context(|| format!("saving {}", user_path.display()))?;
+    Ok(format!(
+        "{id} {}",
+        if enabled { "enabled" } else { "disabled" }
+    ))
+}
+
+// Enable or disable in the real folders
+pub fn set_enabled_here(id: &str, enabled: bool) -> Result<String> {
+    set_enabled(
+        id,
+        enabled,
+        &config_home().join("autostart"),
+        &system_autostart_dirs(),
+    )
 }
 
 // ── Hyprland ─────────────────────────────────────────────────────────────
@@ -265,6 +363,58 @@ mod tests {
         assert_eq!(list.len(), 2);
         let nm = list.iter().find(|e| e.id == "nm-applet").unwrap();
         assert!(!nm.enabled && nm.overrides_system && nm.source == "user");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn set_key_replaces_or_adds_inside_the_entry_group_only() {
+        let text = "[Desktop Entry]\nName=NM\nHidden=false\n[Desktop Action x]\nHidden=keep\n";
+        assert_eq!(
+            set_key(text, "Hidden", "true"),
+            "[Desktop Entry]\nName=NM\nHidden=true\n[Desktop Action x]\nHidden=keep\n"
+        );
+        assert_eq!(
+            set_key(
+                "[Desktop Entry]\nName=NM\n[Desktop Action x]\n",
+                "Hidden",
+                "true"
+            ),
+            "[Desktop Entry]\nName=NM\nHidden=true\n[Desktop Action x]\n"
+        );
+        assert_eq!(
+            set_key("[Desktop Entry]\nName=NM", "Hidden", "true"),
+            "[Desktop Entry]\nName=NM\nHidden=true\n"
+        );
+        assert_eq!(
+            set_key("", "Hidden", "true"),
+            "[Desktop Entry]\nHidden=true\n"
+        );
+    }
+
+    #[test]
+    fn disabling_a_system_entry_writes_a_user_copy_and_enabling_clears_both_switches() {
+        let root = std::env::temp_dir().join(format!("mg-taskr-toggle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (user, system) = (root.join("user"), root.join("system"));
+        std::fs::create_dir_all(&system).unwrap();
+        let original =
+            "[Desktop Entry]\nName=NM\nExec=nm-applet\nX-GNOME-Autostart-enabled=false\n";
+        std::fs::write(system.join("nm-applet.desktop"), original).unwrap();
+        let dirs = [system.clone()];
+
+        set_enabled("nm-applet", false, &user, &dirs).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(system.join("nm-applet.desktop")).unwrap(),
+            original,
+            "system file untouched"
+        );
+        let list = autostart(&user, &dirs, &[]);
+        assert!(!list[0].enabled && list[0].overrides_system);
+
+        set_enabled("nm-applet", true, &user, &dirs).unwrap();
+        assert!(autostart(&user, &dirs, &[])[0].enabled);
+        assert!(set_enabled("../evil", false, &user, &dirs).is_err());
+        assert!(set_enabled("missing", false, &user, &dirs).is_err());
         std::fs::remove_dir_all(root).ok();
     }
 

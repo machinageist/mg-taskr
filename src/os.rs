@@ -35,3 +35,40 @@ pub fn exit_on_closed_pipe() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
+
+// Signal one process by pid
+// pid 0 or anything past i32 would mean "my whole group" or wrap to "everything" — refused here
+#[allow(unsafe_code)]
+pub fn send_signal(pid: u32, signal: i32) -> std::io::Result<()> {
+    let target = one_pid(pid)?;
+    // SAFETY: kill takes two integers; `target` is a single positive pid
+    let status = unsafe { libc::kill(target, signal) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+// Set a process's nice value (-20 fastest … 19 slowest)
+#[allow(unsafe_code)]
+pub fn set_nice(pid: u32, nice: i32) -> std::io::Result<()> {
+    let target = one_pid(pid)?;
+    // SAFETY: setpriority takes integers only; pid 0 (meaning "this process") is refused above
+    let status = unsafe { libc::setpriority(libc::PRIO_PROCESS, target as libc::id_t, nice) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+// A pid that names exactly one process: above 0 and inside the kernel's signed range
+fn one_pid(pid: u32) -> std::io::Result<i32> {
+    i32::try_from(pid).ok().filter(|p| *p > 0).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pid must be a single process above 0",
+        )
+    })
+}
