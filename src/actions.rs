@@ -100,6 +100,32 @@ pub fn signal(proc_root: &Path, pid: u32, sig: Signal) -> Result<String> {
     Ok(format!("{} sent to {pid} ({name})", sig.word()))
 }
 
+// Signal several processes (an app), trying every one even if some refuse
+// one pid reports exactly what went wrong; several report the first failure plus a count
+pub fn signal_many(proc_root: &Path, pids: &[u32], sig: Signal, label: &str) -> Result<String> {
+    let mut failed: Vec<anyhow::Error> = Vec::new();
+    for pid in pids {
+        if let Err(e) = signal(proc_root, *pid, sig) {
+            failed.push(e);
+        }
+    }
+    let count = failed.len();
+    match failed.into_iter().next() {
+        None if pids.len() == 1 => Ok(format!("{} sent to {label}", sig.word())),
+        None => Ok(format!(
+            "{} sent to {label} ({} processes)",
+            sig.word(),
+            pids.len()
+        )),
+        Some(e) if pids.len() == 1 => Err(e),
+        Some(e) => Err(e.context(format!(
+            "{} {label}: {count} of {} processes refused",
+            sig.word(),
+            pids.len()
+        ))),
+    }
+}
+
 // Change the nice value of one of our own processes
 pub fn renice(proc_root: &Path, pid: u32, nice: i32) -> Result<String> {
     let (uid, name) = owner(proc_root, pid)?;
@@ -219,5 +245,15 @@ mod tests {
     fn a_missing_process_is_a_plain_error() {
         let root = std::env::temp_dir();
         assert!(signal(&root, 4_000_000, Signal::Term).is_err());
+    }
+
+    #[test]
+    fn several_pids_are_all_tried_and_failures_counted() {
+        let me = std::process::id();
+        let said = signal_many(Path::new("/proc"), &[me, me], Signal::Cont, "me").unwrap();
+        assert_eq!(said, "cont sent to me (2 processes)");
+        let err =
+            signal_many(Path::new("/proc"), &[me, 4_000_000], Signal::Cont, "mixed").unwrap_err();
+        assert!(format!("{err:#}").starts_with("cont mixed: 1 of 2 processes refused"));
     }
 }

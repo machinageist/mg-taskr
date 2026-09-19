@@ -6,6 +6,7 @@
 //        the dotfiles bridges, and the exit status is 1.
 //        Rates need two looks, so sampling views wait --interval ms (default 500) between them
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -24,6 +25,9 @@ use mg_taskr::{os, sample, startup, system, tui, units};
 const PROC_ROOT: &str = "/proc";
 const SYS_ROOT: &str = "/sys";
 const DEFAULT_INTERVAL_MS: u64 = 500;
+const WATCH_INTERVAL_MS: u64 = 1000;
+// below this the stream would cost more than it shows
+const MIN_WATCH_INTERVAL_MS: u64 = 250;
 
 #[derive(Parser)]
 #[command(
@@ -94,9 +98,17 @@ enum Command {
     },
     /// Full-screen task manager: processes, apps, performance, services, startup
     Tui,
+    /// One JSON line per look — system, processes and apps — until stopped (for the shell panel)
+    Watch {
+        /// Milliseconds between looks
+        #[arg(long, default_value_t = WATCH_INTERVAL_MS)]
+        interval: u64,
+    },
     /// Send a signal: your processes directly, others through the root helper's allowlist
     Signal {
-        pid: u32,
+        /// One or more pids (an app's processes can go together)
+        #[arg(required = true, num_args = 1..)]
+        pids: Vec<u32>,
         #[arg(value_enum)]
         signal: Signal,
     },
@@ -198,9 +210,40 @@ fn run(cli: Cli) -> Result<()> {
             action: Some(StartupAction::Disable { id }),
         } => done(json, startup::set_enabled_here(&id, false)?),
         Command::Tui => tui::run(),
-        Command::Signal { pid, signal } => done(json, actions::signal(proc_root, pid, signal)?),
+        Command::Watch { interval } => watch(interval),
+        Command::Signal { pids, signal } => {
+            let label = match pids.as_slice() {
+                [one] => one.to_string(),
+                _ => "the selected processes".to_string(),
+            };
+            done(
+                json,
+                actions::signal_many(proc_root, &pids, signal, &label)?,
+            )
+        }
         Command::Renice { pid, nice } => done(json, actions::renice(proc_root, pid, nice)?),
         Command::Service { scope, verb, unit } => done(json, actions::service(scope, verb, &unit)?),
+    }
+}
+
+// Stream one look per interval as NDJSON until the reader goes away
+// always JSON — a table redrawn every second belongs to the TUI.
+// a closed pipe ends the program (exit_on_closed_pipe), so the shell stopping it is clean
+fn watch(interval_ms: u64) -> Result<()> {
+    let mut sampler = Sampler::new(PROC_ROOT, SYS_ROOT);
+    let pause = Duration::from_millis(interval_ms.max(MIN_WATCH_INTERVAL_MS));
+    let mut out = std::io::stdout().lock();
+    loop {
+        std::thread::sleep(pause);
+        let (rows, system) = sampler.tick();
+        let apps = views::apps(&rows, SortKey::Cpu);
+        serde_json::to_writer(
+            &mut out,
+            &json!({ "system": system, "processes": rows, "apps": apps }),
+        )?;
+        // one line per look, flushed now — the shell reads line by line
+        writeln!(out)?;
+        out.flush()?;
     }
 }
 

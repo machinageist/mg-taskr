@@ -18,6 +18,7 @@ mg-taskr apps      [--sort …] [--filter TEXT] [--json]      # processes groupe
 mg-taskr system    [--json]                                 # CPU per core, memory, swap, network, disks, load
 mg-taskr services  [--user | --system] [--json]             # running and installed systemd services
 mg-taskr startup   [--json]                                 # XDG autostart + Hyprland autostart lines (read-only)
+mg-taskr watch     [--interval MS]                          # NDJSON: {system, processes, apps} per look, for the shell panel
 ```
 
 Views that show rates sample twice, `--interval` ms apart (default 500).
@@ -25,7 +26,7 @@ Views that show rates sample twice, `--interval` ms apart (default 500).
 ## Actions
 
 ```sh
-mg-taskr signal  <pid> term|kill|stop|cont
+mg-taskr signal  <pid>... term|kill|stop|cont               # several pids: every one is tried
 mg-taskr renice  <pid> <-20..19>                            # own processes; slower only
 mg-taskr service user|system start|stop|restart <unit>
 mg-taskr startup enable|disable <id>                        # writes ~/.config/autostart/<id>.desktop

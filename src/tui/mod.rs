@@ -108,23 +108,7 @@ fn act(action: Action) -> Result<String> {
             pids,
             signal,
             label,
-        } => {
-            // an app is several processes; report the first failure but try them all
-            let mut failed = None;
-            for pid in &pids {
-                if let Err(e) = actions::signal(proc_root, *pid, signal) {
-                    failed.get_or_insert(e);
-                }
-            }
-            match failed {
-                Some(e) if pids.len() == 1 => Err(e),
-                Some(e) => Err(e.context(format!(
-                    "{} {label}: not every process answered",
-                    signal.word()
-                ))),
-                None => Ok(format!("{} sent to {label}", signal.word())),
-            }
-        }
+        } => actions::signal_many(proc_root, &pids, signal, &label),
         Action::Renice { pid, nice, .. } => actions::renice(proc_root, pid, nice),
         Action::Service { scope, verb, unit } => actions::service(scope, verb, &unit),
         Action::Startup { id, enable } => startup::set_enabled_here(&id, enable),
