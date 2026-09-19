@@ -542,7 +542,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &State) {
     } else {
         let keys = match state.tab {
             Tab::Processes => {
-                "e end · K kill · p pause · c continue · + gentler · s sort · t tree · / filter"
+                "e end · K kill · p pause (all ask) · c continue · + gentler · s sort · t tree · / filter"
             }
             Tab::Apps => "e end app · K kill app · p pause · c continue · s sort · / filter",
             Tab::Performance => "graphs cover the last two minutes",

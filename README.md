@@ -56,7 +56,7 @@ or `q` quits).
 
 | Tab | Keys |
 |---|---|
-| Processes | `e`/`Delete` end, `K` kill (both ask y/n), `p` pause, `c` continue, `+` gentler, `s` sort, `t` tree |
+| Processes | `e`/`Delete` end, `K` kill, `p` pause (all three ask y/n), `c` continue, `+` gentler, `s` sort, `t` tree |
 | Apps | the same signals, sent to every process of the app |
 | Services | `S` start, `X` stop, `R` restart (ask y/n), `u` your services ↔ system services |
 | Startup | `space` turn an autostart entry on or off at login |

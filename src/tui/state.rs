@@ -3,8 +3,9 @@
 // Description: Everything the TUI knows and how each key changes it — no terminal involved
 // Notes: `key` turns a keypress into a change of state plus an Effect the loop carries out
 //        (quit, run an action, reload a list). Keeping it pure means tests drive it with plain
-//        key events. Anything that ends or stops something asks y/n first; pause, continue,
-//        renice and startup toggles are undoable, so they act at once.
+//        key events. Anything that ends, stops or pauses something asks y/n first — pausing the
+//        compositor or this terminal would freeze the very screen you need to resume it.
+//        Continue, gentler and startup toggles are harmless or undoable, so they act at once.
 //        Selection follows the thing, not the row number: after a refresh the cursor stays on
 //        the same pid / app / unit / entry even when the list reorders
 
@@ -94,6 +95,11 @@ impl Action {
                 label,
                 ..
             } => format!("Force-kill {label}? Unsaved work is lost."),
+            Action::Signal {
+                signal: Signal::Stop,
+                label,
+                ..
+            } => format!("Pause {label}? It stays frozen until continued."),
             Action::Signal { signal, label, .. } => format!("{} {label}?", signal.word()),
             Action::Service { verb, unit, .. } => format!("{} {unit}?", verb.word()),
             Action::Renice { label, nice, .. } => format!("Set {label} to nice {nice}?"),
@@ -427,9 +433,7 @@ impl State {
                 self.ask_signal(Signal::Term)
             }
             (Tab::Processes | Tab::Apps, KeyCode::Char('K')) => self.ask_signal(Signal::Kill),
-            (Tab::Processes | Tab::Apps, KeyCode::Char('p')) => {
-                return self.now_signal(Signal::Stop);
-            }
+            (Tab::Processes | Tab::Apps, KeyCode::Char('p')) => self.ask_signal(Signal::Stop),
             (Tab::Processes | Tab::Apps, KeyCode::Char('c')) => {
                 return self.now_signal(Signal::Cont);
             }
@@ -615,14 +619,30 @@ pub mod tests {
     }
 
     #[test]
-    fn pause_acts_at_once_and_an_app_signals_all_its_processes() {
+    fn pause_asks_first_continue_does_not_and_an_app_signals_all_its_processes() {
         let mut s = loaded();
         s.key(key(KeyCode::Char('2')));
-        let Effect::Run(Action::Signal { pids, signal, .. }) = s.key(key(KeyCode::Char('p')))
+        assert_eq!(
+            s.key(key(KeyCode::Char('p'))),
+            Effect::None,
+            "pause can freeze the desktop — it asks"
+        );
+        assert!(
+            s.confirm
+                .as_ref()
+                .unwrap()
+                .question()
+                .starts_with("Pause firefox (2 processes)")
+        );
+        let Effect::Run(Action::Signal { pids, signal, .. }) = s.key(key(KeyCode::Char('y')))
         else {
-            panic!("pause needs no question")
+            panic!("y runs it")
         };
         assert_eq!((pids, signal), (vec![20, 21], Signal::Stop));
+        let Effect::Run(Action::Signal { signal, .. }) = s.key(key(KeyCode::Char('c'))) else {
+            panic!("continue needs no question")
+        };
+        assert_eq!(signal, Signal::Cont);
     }
 
     #[test]
