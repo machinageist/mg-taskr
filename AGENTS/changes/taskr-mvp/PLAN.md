@@ -17,3 +17,11 @@ Gates for every slice: `cargo fmt --check`, `cargo clippy --all-targets -- -D wa
 4. **TUI** — ratatui views and keyboard actions.
 5. **Shell panel** (dotfiles) — Task Manager panel, CPU/Memory card buttons, launcher entry,
    CTRL+SHIFT+ESCAPE.
+
+## Status (2026-09-18)
+
+All five slices done. Core 156ba0e, CLI views ee3c9aa, actions b7cb868, TUI 847967c,
+watch and multi-pid signal f5efbff, pause confirmation de78adb. The shell panel is dotfiles
+e97dbe2, and the root helper's taskr subcommands are dotfiles f4cd21c. Waiting on Jeff: a
+re-run of `sudo ~/dotfiles/system/install-root-helper.sh` so the installed helper has
+taskr-service and taskr-signal, then any entries he wants in `/etc/geist/taskr.conf`.
